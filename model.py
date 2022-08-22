@@ -1,5 +1,6 @@
 class FixedBug:
-    __accepted_attributes = ["group_id", "artifact_id", "oid", "title", "tags", "closed_time", "code_diffs"]
+    __accepted_attributes = ["group_id", "artifact_id", "oid", "cid", "commit_msg", "commit_date", "title", "tags",
+                             "closed_time", "code_diffs"]
 
     def __init__(self, gid, aid, oid, title, tags):
         self.group_id = gid
@@ -11,7 +12,7 @@ class FixedBug:
     def __dict__(self):
         result = dict()
         for a in FixedBug.__accepted_attributes:
-            avalue = getattr(self, a)
+            avalue = getattr(self, a,None)
             if avalue is not None:
                 if a == "code_diffs":
                     result[a] = [v.__dict__() for v in avalue]
@@ -32,7 +33,15 @@ class CodeDiff:
     def __dict__(self):
         result = dict()
         for a in CodeDiff.__accepted_attributes:
-            avalue = getattr(self, a)
+            avalue = getattr(self, a,None)
             if avalue is not None:
                 result[a] = avalue
         return result
+
+
+class Commit:
+    def __init__(self, commit_id=None, commit_date=None, commit_message=None, is_bugfix=None):
+        self.commit_id = commit_id
+        self.commit_date = commit_date
+        self.commit_message = commit_message
+        self.is_bugfix = is_bugfix
