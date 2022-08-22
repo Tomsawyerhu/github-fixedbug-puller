@@ -1,230 +1,382 @@
-diff --git a/torch/testing/_internal/common_methods_invocations.py b/torch/testing/_internal/common_methods_invocations.py
-index e4b930b96b..d316b2cd2b 100644
---- a/torch/testing/_internal/common_methods_invocations.py
-+++ b/torch/testing/_internal/common_methods_invocations.py
-@@ -92,12 +92,6 @@ from torch.testing._internal.opinfo.core import (  # noqa: F401
-     ShapeFuncInfo,
-     sample_inputs_foreach,
-     ForeachFuncInfo,
--    gradcheck_wrapper_hermitian_input,
--    gradcheck_wrapper_triangular_input,
--    gradcheck_wrapper_triangular_input_real_positive_diagonal,
--    gradcheck_wrapper_masked_operation,
--    gradcheck_wrapper_masked_pointwise_operation,
--    clone_sample,
- )
- from torch.testing._internal import opinfo
+commit 9cf0de509fc519bd8460a999b418f822e6543d33
+Author: Peter Bell <peterbell10@live.co.uk>
+Date:   Tue Jan 4 10:58:43 2022 -0800
+
+    DispatchStub: Improve type mismatch errors (#67880)
+    
+    Summary:
+    Currently when you register a kernel implementation to a dispatch stub,
+    it takes the function signature from the function pointer you pass in.
+    That means if you get the signature wrong, it fails at runtime with a
+    link error instead of failing during the compilation. This also means
+    that when registering nullptr you need to manually specify the type.
+    
+    Instead, taking the type from `DispatchStub::FnPtr` means quicker time
+    to signal on failure and better error messages. The only downside is
+    you need to actually include the DispatchStub declaration which for
+    some CPU kernels was missing, so I've had to add them here.
+    
+    Pull Request resolved: https://github.com/pytorch/pytorch/pull/67880
+    
+    Reviewed By: mrshenli
+    
+    Differential Revision: D33400922
+    
+    Pulled By: ngimel
+    
+    fbshipit-source-id: 2da22f053ef82da5db512986e5b968d97a681617
+
+diff --git a/aten/src/ATen/native/Convolution.cpp b/aten/src/ATen/native/Convolution.cpp
+index 1760011553..714d64029b 100644
+--- a/aten/src/ATen/native/Convolution.cpp
++++ b/aten/src/ATen/native/Convolution.cpp
+@@ -33,11 +33,11 @@ DEFINE_DISPATCH(mkldnn_convolution_backward_stub);
+ DEFINE_DISPATCH(slow_conv_dilated2d_backward_stub);
+ DEFINE_DISPATCH(slow_conv_dilated3d_backward_stub);
+ DEFINE_DISPATCH(slow_conv_transpose2d_backward_stub);
+-REGISTER_NO_CPU_DISPATCH(cudnn_convolution_backward_stub, cudnn_convolution_backward_fn);
+-REGISTER_NO_CPU_DISPATCH(cudnn_convolution_transpose_backward_stub, cudnn_convolution_transpose_backward_fn);
+-REGISTER_NO_CPU_DISPATCH(miopen_convolution_backward_stub, miopen_convolution_backward_fn);
+-REGISTER_NO_CPU_DISPATCH(miopen_convolution_transpose_backward_stub, miopen_convolution_transpose_backward_fn);
+-REGISTER_NO_CPU_DISPATCH(miopen_depthwise_convolution_backward_stub, miopen_depthwise_convolution_backward_fn);
++REGISTER_NO_CPU_DISPATCH(cudnn_convolution_backward_stub);
++REGISTER_NO_CPU_DISPATCH(cudnn_convolution_transpose_backward_stub);
++REGISTER_NO_CPU_DISPATCH(miopen_convolution_backward_stub);
++REGISTER_NO_CPU_DISPATCH(miopen_convolution_transpose_backward_stub);
++REGISTER_NO_CPU_DISPATCH(miopen_depthwise_convolution_backward_stub);
  
-@@ -2010,6 +2004,28 @@ def sample_inputs_singular_matrix_factors(op_info, device, dtype, requires_grad=
-             yield SampleInput(a, args=(b,), kwargs=kwargs)
+ std::ostream& operator<<(std::ostream & out, const ConvParams& params) {
+   out << "ConvParams {"
+diff --git a/aten/src/ATen/native/DispatchStub.h b/aten/src/ATen/native/DispatchStub.h
+index 547cd21dac..2d4b871eee 100644
+--- a/aten/src/ATen/native/DispatchStub.h
++++ b/aten/src/ATen/native/DispatchStub.h
+@@ -183,16 +183,16 @@ private:
+ };
+ 
+ namespace {
+-template <typename FnPtr, typename T>
++template <typename DispatchStub>
+ struct RegisterCUDADispatch {
+-  RegisterCUDADispatch(DispatchStub<FnPtr, T>& stub, FnPtr value) {
++  RegisterCUDADispatch(DispatchStub &stub, typename DispatchStub::FnPtr value) {
+     stub.set_cuda_dispatch_ptr(value);
+   }
+ };
+ 
+-template <typename FnPtr, typename T>
++template <typename DispatchStub>
+ struct RegisterHIPDispatch {
+-  RegisterHIPDispatch(DispatchStub<FnPtr, T>& stub, FnPtr value) {
++  RegisterHIPDispatch(DispatchStub &stub, typename DispatchStub::FnPtr value) {
+     // TODO: make this point at hip_dispatch_ptr
+     stub.set_cuda_dispatch_ptr(value);
+   }
+@@ -215,7 +215,7 @@ struct RegisterHIPDispatch {
+ #define DEFINE_DISPATCH(name) struct name name
+ 
+ #define REGISTER_ARCH_DISPATCH(name, arch, fn) \
+-  template <> decltype(fn) DispatchStub<decltype(fn), struct name>::arch = fn;
++  template <> name::FnPtr DispatchStub<name::FnPtr, struct name>::arch = fn;
+ 
+ #ifdef HAVE_AVX512_CPU_DEFINITION
+ #define REGISTER_AVX512_DISPATCH(name, fn) REGISTER_ARCH_DISPATCH(name, AVX512, fn)
+@@ -250,14 +250,14 @@ struct RegisterHIPDispatch {
+   REGISTER_VSX_DISPATCH(name, fn)                                              \
+   REGISTER_ZVECTOR_DISPATCH(name, fn)
+ 
+-#define REGISTER_NO_CPU_DISPATCH(name, fn_type)                                \
+-  REGISTER_ALL_CPU_DISPATCH(name, static_cast<fn_type>(nullptr))
++#define REGISTER_NO_CPU_DISPATCH(name)                                         \
++  REGISTER_ALL_CPU_DISPATCH(name, nullptr)
+ 
+ #define REGISTER_CUDA_DISPATCH(name, fn) \
+-  static RegisterCUDADispatch<decltype(fn), struct name> name ## __register(name, fn);
++  static RegisterCUDADispatch<struct name> name ## __register(name, fn);
+ 
+ #define REGISTER_HIP_DISPATCH(name, fn) \
+-  static RegisterHIPDispatch<decltype(fn), struct name> name ## __register(name, fn);
++  static RegisterHIPDispatch<struct name> name ## __register(name, fn);
+ 
+ // NB: This macro must be used in an actual 'cu' file; if you try using
+ // it from a 'cpp' file it will not work!
+@@ -270,8 +270,8 @@ struct RegisterHIPDispatch {
+ // #define REGISTER_DISPATCH(name, fn) REGISTER_HIP_DISPATCH(name, fn)
+ #elif defined(CPU_CAPABILITY)
+ #define REGISTER_DISPATCH(name, fn) REGISTER_ARCH_DISPATCH(name, CPU_CAPABILITY, fn)
+-#define REGISTER_NO_AVX512_DISPATCH(name, fn_type)                             \
+-  REGISTER_AVX512_DISPATCH(name, static_cast<fn_type>(nullptr))
++#define REGISTER_NO_AVX512_DISPATCH(name)       \
++  REGISTER_AVX512_DISPATCH(name, nullptr)
+ #endif
  
  
-+def clone_sample(sample, **kwargs):
-+    """
-+    Given a SampleInput, this function analyzes its input, args and kwargs,
-+    and produces a copy with each non-Tensor entry being copied by reference,
-+    and with each Tensor entry cloned with `t.clone().requires_grad_(t.requires_grad)`
-+    """
-+
-+    def clone_tensor(t):
-+        if isinstance(t, torch.Tensor):
-+            return t.detach().clone().requires_grad_(t.requires_grad)
-+        else:
-+            return t
-+
-+    sample_kwargs = kwargs if kwargs else sample.kwargs
-+
-+    return SampleInput(
-+        clone_tensor(sample.input),
-+        args=tuple(map(clone_tensor, sample.args)),
-+        kwargs=dict(((k, clone_tensor(v)) for k, v in sample_kwargs.items()))
-+    )
-+
-+
- def sample_inputs_svd_lowrank(op_info, device, dtype, requires_grad=False, **kwargs):
-     for sample in sample_inputs_singular_matrix_factors(op_info, device, dtype, requires_grad, **kwargs):
-         *batch, m, k = sample.input.shape
-@@ -8527,6 +8543,79 @@ def reference_searchsorted(sorted_sequence, boundary, out_int32=False, right=Fal
-         return np.stack(split_ret).reshape(orig_shape)
+diff --git a/aten/src/ATen/native/RNN.cpp b/aten/src/ATen/native/RNN.cpp
+index f6c308a539..8793f4e5d7 100644
+--- a/aten/src/ATen/native/RNN.cpp
++++ b/aten/src/ATen/native/RNN.cpp
+@@ -1210,10 +1210,10 @@ bool _use_cudnn_rnn_flatten_weight() {
+   DEFINE_DISPATCH(NAME##_miopen_stub);                                      \
+   DEFINE_DISPATCH(NAME##_packed_cudnn_stub);                                \
+   DEFINE_DISPATCH(NAME##_packed_miopen_stub);                               \
+-  REGISTER_NO_CPU_DISPATCH(NAME##_cudnn_stub, rnn_fn);                      \
+-  REGISTER_NO_CPU_DISPATCH(NAME##_miopen_stub, rnn_fn);                     \
+-  REGISTER_NO_CPU_DISPATCH(NAME##_packed_cudnn_stub, rnn_packed_fn);        \
+-  REGISTER_NO_CPU_DISPATCH(NAME##_packed_miopen_stub, rnn_packed_fn);       \
++  REGISTER_NO_CPU_DISPATCH(NAME##_cudnn_stub);                              \
++  REGISTER_NO_CPU_DISPATCH(NAME##_miopen_stub);                             \
++  REGISTER_NO_CPU_DISPATCH(NAME##_packed_cudnn_stub);                       \
++  REGISTER_NO_CPU_DISPATCH(NAME##_packed_miopen_stub);                      \
+                                                                             \
+   std::tuple<Tensor, Tensor> NAME(                                          \
+       const Tensor& _input,                                                 \
+@@ -1464,10 +1464,10 @@ DEFINE_DISPATCH(lstm_cudnn_stub);
+ DEFINE_DISPATCH(lstm_packed_cudnn_stub);
+ DEFINE_DISPATCH(lstm_miopen_stub);
+ DEFINE_DISPATCH(lstm_packed_miopen_stub);
+-REGISTER_NO_CPU_DISPATCH(lstm_cudnn_stub, lstm_fn);
+-REGISTER_NO_CPU_DISPATCH(lstm_packed_cudnn_stub, lstm_packed_fn);
+-REGISTER_NO_CPU_DISPATCH(lstm_miopen_stub, lstm_fn);
+-REGISTER_NO_CPU_DISPATCH(lstm_packed_miopen_stub, lstm_packed_fn);
++REGISTER_NO_CPU_DISPATCH(lstm_cudnn_stub);
++REGISTER_NO_CPU_DISPATCH(lstm_packed_cudnn_stub);
++REGISTER_NO_CPU_DISPATCH(lstm_miopen_stub);
++REGISTER_NO_CPU_DISPATCH(lstm_packed_miopen_stub);
  
+ std::tuple<Tensor, Tensor, Tensor> lstm(
+       const Tensor& _input, TensorList hx,
+diff --git a/aten/src/ATen/native/RangeFactories.cpp b/aten/src/ATen/native/RangeFactories.cpp
+index 244eed2e84..c7e39827e2 100644
+--- a/aten/src/ATen/native/RangeFactories.cpp
++++ b/aten/src/ATen/native/RangeFactories.cpp
+@@ -1,8 +1,8 @@
++#include <ATen/native/RangeFactories.h>
+ #include <ATen/NativeFunctions.h>
+ #include <ATen/AccumulateType.h>
+ #include <ATen/Parallel.h>
+ #include <ATen/Dispatch.h>
+-#include <ATen/native/DispatchStub.h>
+ #include <ATen/native/TensorIterator.h>
+ #include <c10/util/irange.h>
+ #include <cmath>
+@@ -10,8 +10,6 @@
  
-+def gradcheck_wrapper_hermitian_input(op, input, *args, **kwargs):
-+    """Gradcheck wrapper for functions that take Hermitian matrices as input.
-+
-+    They require a modified function because the finite-difference algorithm
-+    for calculating derivatives does not preserve the Hermitian property of the input.
-+    """
-+    return op(input + input.mH, *args, **kwargs)
-+
-+
-+def gradcheck_wrapper_triangular_input(op, *args, upper=False, idx=0, **kwargs):
-+    """Gradcheck wrapper for functions that take lower or upper triangular matrices as input.
-+
-+    They require a modified function because the finite-difference algorithm
-+    for calculating derivatives does not preserve the triangular property of the input.
-+    `idx` is used to specific which `args[idx]` is to be triangularized.
-+    """
-+    triangular_arg = args[idx].triu() if upper else args[idx].tril()
-+    return op(*args[:idx], triangular_arg, *args[idx + 1:], upper, **kwargs)
-+
-+
-+def gradcheck_wrapper_triangular_input_real_positive_diagonal(op, *args, upper=False, idx=0, **kwargs):
-+    """Gradcheck wrapper for functions that take lower/upper triangular matrices
-+    with real and positive diagonals, for example, cholesky-like operations.
-+    """
-+    arg = args[idx]
-+    arg_diag = arg.diagonal(0, -2, -1)
-+    arg_diag_embed = torch.diag_embed(arg_diag)
-+    id_diag_tensor = torch.ones_like(arg_diag)
-+    id_tensor = torch.diag_embed(id_diag_tensor)
-+    # new_arg = arg - diag(arg) + I
-+    new_arg = arg - arg_diag_embed + id_tensor
-+    return gradcheck_wrapper_triangular_input(
-+        op, *args[:idx], new_arg, *args[idx + 1:],
-+        upper=upper, idx=idx, **kwargs
-+    )
-+
-+
-+def gradcheck_wrapper_masked_operation(op, input, *args, **kwargs):
-+    """Gradcheck wrapper for masked operations.
-+
-+    When mask is specified, replaces masked-out elements with zeros.
-+
-+    Use for operations that produce non-finite masked-out elements,
-+    for instance, for minimum and maximum reductions.
-+    """
-+    output = op(input, *args, **kwargs)
-+    mask = kwargs.get('mask')
-+    if mask is not None:
-+        output_mask = torch._masked._output_mask(op, input, *args, **kwargs)
-+        output = torch.where(output_mask, output, output.new_zeros([]))
-+    return output
-+
-+
-+def gradcheck_wrapper_masked_pointwise_operation(op, input, *args, **kwargs):
-+    """Gradcheck wrapper for masked pointwise operations. Assumes that the result
-+    will be masked iff both tensors are masked at a specific index
-+
-+    When mask is specified, replaces masked-out elements with zeros.
-+
-+    Use for operations that produce non-finite masked-out elements,
-+    for instance, for minimum and maximum reductions.
-+    """
-+    output = op(input, *args, **kwargs)
-+    input_mask = kwargs.get('input_mask')
-+    other_mask = kwargs.get('other_mask')
-+    if input_mask is not None and other_mask is not None:
-+        combined_mask = torch.logical_and(input_mask, other_mask)
-+        new_kwargs = dict(mask=combined_mask, **kwargs)
-+        output_mask = torch._masked._input_mask(input, *args, **new_kwargs)
-+        output = torch.where(output_mask, output, output.new_zeros([]))
-+    return output
-+
-+
- def reference_reduction_numpy(f, supports_keepdims=True):
-     """Wraps a NumPy reduction operator.
+ namespace at { namespace native {
  
-diff --git a/torch/testing/_internal/opinfo/core.py b/torch/testing/_internal/opinfo/core.py
-index 5ff9e5d9cc..1cb1778065 100644
---- a/torch/testing/_internal/opinfo/core.py
-+++ b/torch/testing/_internal/opinfo/core.py
-@@ -2668,99 +2668,3 @@ class ForeachFuncInfo(OpInfo):
+-DECLARE_DISPATCH(void(*)(TensorIterator&, const Scalar&, const Scalar&, const Scalar&), arange_stub);
+-DECLARE_DISPATCH(void(*)(TensorIterator&, const Scalar&, const Scalar&, int64_t), linspace_stub);
  
-         if name == "norm":
-             self.ref = torch.linalg.vector_norm
--
--
--def gradcheck_wrapper_hermitian_input(op, input, *args, **kwargs):
--    """Gradcheck wrapper for functions that take Hermitian matrices as input.
--
--    They require a modified function because the finite-difference algorithm
--    for calculating derivatives does not preserve the Hermitian property of the input.
--    """
--    return op(input + input.mH, *args, **kwargs)
--
--
--def gradcheck_wrapper_triangular_input(op, *args, upper=False, idx=0, **kwargs):
--    """Gradcheck wrapper for functions that take lower or upper triangular matrices as input.
--
--    They require a modified function because the finite-difference algorithm
--    for calculating derivatives does not preserve the triangular property of the input.
--    `idx` is used to specific which `args[idx]` is to be triangularized.
--    """
--    triangular_arg = args[idx].triu() if upper else args[idx].tril()
--    return op(*args[:idx], triangular_arg, *args[idx + 1 :], upper, **kwargs)
--
--
--def gradcheck_wrapper_triangular_input_real_positive_diagonal(
--    op, *args, upper=False, idx=0, **kwargs
--):
--    """Gradcheck wrapper for functions that take lower/upper triangular matrices
--    with real and positive diagonals, for example, cholesky-like operations.
--    """
--    arg = args[idx]
--    arg_diag = arg.diagonal(0, -2, -1)
--    arg_diag_embed = torch.diag_embed(arg_diag)
--    id_diag_tensor = torch.ones_like(arg_diag)
--    id_tensor = torch.diag_embed(id_diag_tensor)
--    # new_arg = arg - diag(arg) + I
--    new_arg = arg - arg_diag_embed + id_tensor
--    return gradcheck_wrapper_triangular_input(
--        op, *args[:idx], new_arg, *args[idx + 1 :], upper=upper, idx=idx, **kwargs
--    )
--
--
--def gradcheck_wrapper_masked_operation(op, input, *args, **kwargs):
--    """Gradcheck wrapper for masked operations.
--
--    When mask is specified, replaces masked-out elements with zeros.
--
--    Use for operations that produce non-finite masked-out elements,
--    for instance, for minimum and maximum reductions.
--    """
--    output = op(input, *args, **kwargs)
--    mask = kwargs.get("mask")
--    if mask is not None:
--        output_mask = torch._masked._output_mask(op, input, *args, **kwargs)
--        output = torch.where(output_mask, output, output.new_zeros([]))
--    return output
--
--
--def gradcheck_wrapper_masked_pointwise_operation(op, input, *args, **kwargs):
--    """Gradcheck wrapper for masked pointwise operations. Assumes that the result
--    will be masked iff both tensors are masked at a specific index
--
--    When mask is specified, replaces masked-out elements with zeros.
--
--    Use for operations that produce non-finite masked-out elements,
--    for instance, for minimum and maximum reductions.
--    """
--    output = op(input, *args, **kwargs)
--    input_mask = kwargs.get("input_mask")
--    other_mask = kwargs.get("other_mask")
--    if input_mask is not None and other_mask is not None:
--        combined_mask = torch.logical_and(input_mask, other_mask)
--        new_kwargs = dict(mask=combined_mask, **kwargs)
--        output_mask = torch._masked._input_mask(input, *args, **new_kwargs)
--        output = torch.where(output_mask, output, output.new_zeros([]))
--    return output
--
--
--def clone_sample(sample, **kwargs):
--    """
--    Given a SampleInput, this function analyzes its input, args and kwargs,
--    and produces a copy with each non-Tensor entry being copied by reference,
--    and with each Tensor entry cloned with `t.clone().requires_grad_(t.requires_grad)`
--    """
--
--    def clone_tensor(t):
--        if isinstance(t, torch.Tensor):
--            return t.detach().clone().requires_grad_(t.requires_grad)
--        else:
--            return t
--
--    sample_kwargs = kwargs if kwargs else sample.kwargs
--
--    return SampleInput(
--        clone_tensor(sample.input),
--        args=tuple(map(clone_tensor, sample.args)),
--        kwargs=dict(((k, clone_tensor(v)) for k, v in sample_kwargs.items())),
--    )
+ Tensor& linspace_out(const Scalar& start, const Scalar& end, c10::optional<int64_t> optional_steps, Tensor& result) {
+   const auto steps = optional_steps.value_or(100);
+diff --git a/aten/src/ATen/native/RangeFactories.h b/aten/src/ATen/native/RangeFactories.h
+new file mode 100644
+index 0000000000..df3b43856e
+--- /dev/null
++++ b/aten/src/ATen/native/RangeFactories.h
+@@ -0,0 +1,12 @@
++#include <ATen/native/DispatchStub.h>
++#include <c10/core/Scalar.h>
++
++namespace at {
++struct TensorIterator;
++
++namespace native {
++
++DECLARE_DISPATCH(void(*)(TensorIterator&, const Scalar&, const Scalar&, const Scalar&), arange_stub);
++DECLARE_DISPATCH(void(*)(TensorIterator&, const Scalar&, const Scalar&, int64_t), linspace_stub);
++
++}}  // namespace at::native
+diff --git a/aten/src/ATen/native/TensorAdvancedIndexing.cpp b/aten/src/ATen/native/TensorAdvancedIndexing.cpp
+index ba0f047826..462b71e573 100644
+--- a/aten/src/ATen/native/TensorAdvancedIndexing.cpp
++++ b/aten/src/ATen/native/TensorAdvancedIndexing.cpp
+@@ -248,7 +248,7 @@ DEFINE_DISPATCH(index_put_with_sort_stub);
+ DEFINE_DISPATCH(put_stub);
+ DEFINE_DISPATCH(take_stub);
+ DEFINE_DISPATCH(masked_fill_stub);
+-REGISTER_NO_CPU_DISPATCH(index_put_with_sort_stub, index_put_with_sort_fn);
++REGISTER_NO_CPU_DISPATCH(index_put_with_sort_stub);
+ DEFINE_DISPATCH(masked_select_serial_stub);
+ DEFINE_DISPATCH(masked_select_stub);
+ DEFINE_DISPATCH(masked_scatter_stub);
+diff --git a/aten/src/ATen/native/cpu/DistributionKernels.cpp b/aten/src/ATen/native/cpu/DistributionKernels.cpp
+index 0f999c28ae..f6803e5a39 100644
+--- a/aten/src/ATen/native/cpu/DistributionKernels.cpp
++++ b/aten/src/ATen/native/cpu/DistributionKernels.cpp
+@@ -151,7 +151,7 @@ REGISTER_DISPATCH(log_normal_stub, &log_normal_kernel);
+ #ifdef CPU_CAPABILITY_AVX512
+ // normal_stub isn't being dispatched to AVX512 because it exposes
+ // flakiness in test_sgd of test/test_optim.py
+-REGISTER_NO_AVX512_DISPATCH(normal_stub, void(*)(Tensor&, const double, const double, c10::optional<Generator>));
++REGISTER_NO_AVX512_DISPATCH(normal_stub);
+ #else
+ REGISTER_DISPATCH(normal_stub, &normal_kernel);
+ #endif
+diff --git a/aten/src/ATen/native/cpu/MaxUnpoolKernel.cpp b/aten/src/ATen/native/cpu/MaxUnpoolKernel.cpp
+index 222274e83b..14a77233cf 100644
+--- a/aten/src/ATen/native/cpu/MaxUnpoolKernel.cpp
++++ b/aten/src/ATen/native/cpu/MaxUnpoolKernel.cpp
+@@ -1,3 +1,4 @@
++#include <ATen/native/cpu/MaxUnpoolKernel.h>
+ #include <ATen/ATen.h>
+ 
+ #include <ATen/Dispatch.h>
+diff --git a/aten/src/ATen/native/cpu/RangeFactoriesKernel.cpp b/aten/src/ATen/native/cpu/RangeFactoriesKernel.cpp
+index 1c542d4b4b..c92c68f9f4 100644
+--- a/aten/src/ATen/native/cpu/RangeFactoriesKernel.cpp
++++ b/aten/src/ATen/native/cpu/RangeFactoriesKernel.cpp
+@@ -1,4 +1,5 @@
+ #define TORCH_ASSERT_NO_OPERATORS
++#include <ATen/native/RangeFactories.h>
+ #include <cmath>
+ #include <ATen/Config.h>
+ #include <ATen/Dispatch.h>
+diff --git a/aten/src/ATen/native/cpu/SumKernel.cpp b/aten/src/ATen/native/cpu/SumKernel.cpp
+index 8318314054..dcddc6ceb5 100644
+--- a/aten/src/ATen/native/cpu/SumKernel.cpp
++++ b/aten/src/ATen/native/cpu/SumKernel.cpp
+@@ -639,7 +639,7 @@ REGISTER_DISPATCH(sum_stub, &sum_kernel_impl);
+ #ifndef CPU_CAPABILITY_AVX512
+ REGISTER_DISPATCH(nansum_stub, &nansum_kernel_impl);
+ #else
+-REGISTER_NO_AVX512_DISPATCH(nansum_stub, reduce_fn);
++REGISTER_NO_AVX512_DISPATCH(nansum_stub);
+ #endif
+ 
+ }}  // namespace at::native
+diff --git a/aten/src/ATen/native/mkl/SpectralOps.cpp b/aten/src/ATen/native/mkl/SpectralOps.cpp
+index b82d9b5798..870b01063e 100644
+--- a/aten/src/ATen/native/mkl/SpectralOps.cpp
++++ b/aten/src/ATen/native/mkl/SpectralOps.cpp
+@@ -561,7 +561,7 @@ Tensor _fft_c2c_mkl(const Tensor& self, IntArrayRef dim, int64_t normalization,
+ #else
+ 
+ namespace at { namespace native {
+-REGISTER_NO_CPU_DISPATCH(fft_fill_with_conjugate_symmetry_stub, fft_fill_with_conjugate_symmetry_fn);
++REGISTER_NO_CPU_DISPATCH(fft_fill_with_conjugate_symmetry_stub);
+ 
+ Tensor _fft_c2r_mkl(const Tensor& self, IntArrayRef dim, int64_t normalization, int64_t last_dim_size) {
+   AT_ERROR("fft: ATen not compiled with FFT support");
+diff --git a/aten/src/ATen/native/mkldnn/Conv.cpp b/aten/src/ATen/native/mkldnn/Conv.cpp
+index 2ee0450d43..dbd60e9575 100644
+--- a/aten/src/ATen/native/mkldnn/Conv.cpp
++++ b/aten/src/ATen/native/mkldnn/Conv.cpp
+@@ -31,7 +31,7 @@ std::tuple<Tensor, Tensor, Tensor> mkldnn_convolution_backward(
+   TORCH_CHECK(false, "mkldnn_convolution_backward: ATen not compiled with MKLDNN support");
+ }
+ 
+-REGISTER_NO_CPU_DISPATCH(mkldnn_convolution_backward_stub, mkldnn_convolution_backward_fn);
++REGISTER_NO_CPU_DISPATCH(mkldnn_convolution_backward_stub);
+ 
+ }}
+ 
+diff --git a/aten/src/ATen/native/quantized/cpu/kernels/QuantizedOpKernels.cpp b/aten/src/ATen/native/quantized/cpu/kernels/QuantizedOpKernels.cpp
+index 3277ab55bb..91487413b3 100644
+--- a/aten/src/ATen/native/quantized/cpu/kernels/QuantizedOpKernels.cpp
++++ b/aten/src/ATen/native/quantized/cpu/kernels/QuantizedOpKernels.cpp
+@@ -3437,63 +3437,48 @@ void dequantize_tensor_per_tensor_affine_sub_byte_cpu(
+ // So, until Quantization support for Windows is fixed for AVX512,
+ // AVX2 kernels would be used instead. Ref: GH 56992.
+ #if defined(CPU_CAPABILITY_AVX512) && defined(_WIN32)
+-REGISTER_NO_AVX512_DISPATCH(dequantize_tensor_per_channel_affine_stub,
+-                            dequantize_tensor_per_channel_affine_fn);
+-REGISTER_NO_AVX512_DISPATCH(dequantize_tensor_per_tensor_affine_stub,
+-                            dequantize_tensor_per_tensor_affine_fn);
+-REGISTER_NO_AVX512_DISPATCH(dequantize_tensor_per_channel_float_qparams_stub,
+-                            dequantize_tensor_per_channel_float_qparams_fn);
+-REGISTER_NO_AVX512_DISPATCH(fake_quant_grad_learnable_tensor_stub,
+-                            fake_quant_learnable_grad_tensor_fn);
+-REGISTER_NO_AVX512_DISPATCH(fake_quant_per_channel_cachemask_stub,
+-                            fake_quant_per_channel_cachemask_fn);
+-REGISTER_NO_AVX512_DISPATCH(fake_quant_tensor_cachemask_stub,
+-                            fake_quant_tensor_cachemask_fn);
+-REGISTER_NO_AVX512_DISPATCH(fake_quant_tensor_cachemask_tensor_qparams_stub,
+-                            fake_quant_tensor_cachemask_tensor_qparams_fn);
+-REGISTER_NO_AVX512_DISPATCH(qadaptive_avg_pool2d_nhwc_stub,
+-                            qadaptive_avg_pool2d_fn);
+-REGISTER_NO_AVX512_DISPATCH(qadaptive_avg_pool3d_ndhwc_stub,
+-                            qadaptive_avg_pool3d_fn);
+-REGISTER_NO_AVX512_DISPATCH(qadd_relu_stub, qbinary_fn);
+-REGISTER_NO_AVX512_DISPATCH(qadd_scalar_relu_stub, qadd_scalar_fn);
+-REGISTER_NO_AVX512_DISPATCH(qadd_scalar_stub, qadd_scalar_fn);
+-REGISTER_NO_AVX512_DISPATCH(qadd_stub, qbinary_fn);
+-REGISTER_NO_AVX512_DISPATCH(qavg_pool2d_nhwc_stub, qavg_pool2d_fn);
+-REGISTER_NO_AVX512_DISPATCH(qavg_pool3d_nhwc_stub, qavg_pool3d_fn);
+-REGISTER_NO_AVX512_DISPATCH(qbatch_norm_relu_stub, qbatch_norm_fn);
+-REGISTER_NO_AVX512_DISPATCH(qbatch_norm_stub, qbatch_norm_fn);
+-REGISTER_NO_AVX512_DISPATCH(qcat_nhwc_stub, qcat_nhwc_fn);
+-REGISTER_NO_AVX512_DISPATCH(qcat_relu_nhwc_stub, qcat_nhwc_fn);
+-REGISTER_NO_AVX512_DISPATCH(qclamp_stub, qclamp_fn);
+-REGISTER_NO_AVX512_DISPATCH(qclamp_min_stub, qclamp_minmax_fn);
+-REGISTER_NO_AVX512_DISPATCH(qclamp_max_stub, qclamp_minmax_fn);
+-REGISTER_NO_AVX512_DISPATCH(qelu_stub, qelu_fn);
+-REGISTER_NO_AVX512_DISPATCH(qhardsigmoid_stub, qhardsigmoid_fn);
+-REGISTER_NO_AVX512_DISPATCH(qhardswish_stub, qhardswish_fn);
+-REGISTER_NO_AVX512_DISPATCH(qmaxpool_2d_nhwc_stub, qmaxpool_2d_fn);
+-REGISTER_NO_AVX512_DISPATCH(qmul_relu_stub, qbinary_fn);
+-REGISTER_NO_AVX512_DISPATCH(qmul_stub, qbinary_fn);
+-REGISTER_NO_AVX512_DISPATCH(qrelu_leaky_stub, qrelu_leaky_fn);
+-REGISTER_NO_AVX512_DISPATCH(qrelu_stub, qrelu_fn);
+-REGISTER_NO_AVX512_DISPATCH(qsigmoid_stub, qsigmoid_fn);
+-REGISTER_NO_AVX512_DISPATCH(qtanh_stub, qtanh_fn);
+-REGISTER_NO_AVX512_DISPATCH(qthreshold_stub, qthreshold_fn);
+-REGISTER_NO_AVX512_DISPATCH(qtopk_stub, qtopk_fn);
+-REGISTER_NO_AVX512_DISPATCH(fake_quant_grad_learnable_channel_stub,
+-                            fake_quant_learnable_per_channel_fn);
+-REGISTER_NO_AVX512_DISPATCH(quantize_tensor_per_tensor_affine_stub,
+-                            quantize_tensor_per_tensor_affine_fn);
+-REGISTER_NO_AVX512_DISPATCH(quantize_tensor_per_channel_affine_stub,
+-                            quantize_tensor_per_channel_affine_fn);
+-REGISTER_NO_AVX512_DISPATCH(quantize_tensor_per_channel_float_qparams_stub,
+-                            quantize_tensor_per_channel_float_qparams_fn);
+-REGISTER_NO_AVX512_DISPATCH(quantized_normalize_stub, qnormalize_fn);
+-REGISTER_NO_AVX512_DISPATCH(qupsample_bilinear2d_nhwc_stub, qupsample_bilinear2d_fn);
+-REGISTER_NO_AVX512_DISPATCH(quantize_tensor_per_tensor_affine_sub_byte_stub,
+-                            quantize_tensor_per_tensor_affine_sub_byte_fn);
+-REGISTER_NO_AVX512_DISPATCH(dequantize_tensor_per_tensor_affine_sub_byte_stub,
+-                            dequantize_tensor_per_tensor_affine_sub_byte_fn);
++REGISTER_NO_AVX512_DISPATCH(dequantize_tensor_per_channel_affine_stub);
++REGISTER_NO_AVX512_DISPATCH(dequantize_tensor_per_tensor_affine_stub);
++REGISTER_NO_AVX512_DISPATCH(dequantize_tensor_per_channel_float_qparams_stub);
++REGISTER_NO_AVX512_DISPATCH(fake_quant_grad_learnable_tensor_stub);
++REGISTER_NO_AVX512_DISPATCH(fake_quant_per_channel_cachemask_stub);
++REGISTER_NO_AVX512_DISPATCH(fake_quant_tensor_cachemask_stub);
++REGISTER_NO_AVX512_DISPATCH(fake_quant_tensor_cachemask_tensor_qparams_stub);
++REGISTER_NO_AVX512_DISPATCH(qadaptive_avg_pool2d_nhwc_stub);
++REGISTER_NO_AVX512_DISPATCH(qadaptive_avg_pool3d_ndhwc_stub);
++REGISTER_NO_AVX512_DISPATCH(qadd_relu_stub);
++REGISTER_NO_AVX512_DISPATCH(qadd_scalar_relu_stub);
++REGISTER_NO_AVX512_DISPATCH(qadd_scalar_stub);
++REGISTER_NO_AVX512_DISPATCH(qadd_stub);
++REGISTER_NO_AVX512_DISPATCH(qavg_pool2d_nhwc_stub);
++REGISTER_NO_AVX512_DISPATCH(qavg_pool3d_nhwc_stub);
++REGISTER_NO_AVX512_DISPATCH(qbatch_norm_relu_stub);
++REGISTER_NO_AVX512_DISPATCH(qbatch_norm_stub);
++REGISTER_NO_AVX512_DISPATCH(qcat_nhwc_stub);
++REGISTER_NO_AVX512_DISPATCH(qcat_relu_nhwc_stub);
++REGISTER_NO_AVX512_DISPATCH(qclamp_stub);
++REGISTER_NO_AVX512_DISPATCH(qclamp_min_stub);
++REGISTER_NO_AVX512_DISPATCH(qclamp_max_stub);
++REGISTER_NO_AVX512_DISPATCH(qelu_stub);
++REGISTER_NO_AVX512_DISPATCH(qhardsigmoid_stub);
++REGISTER_NO_AVX512_DISPATCH(qhardswish_stub);
++REGISTER_NO_AVX512_DISPATCH(qmaxpool_2d_nhwc_stub);
++REGISTER_NO_AVX512_DISPATCH(qmul_relu_stub);
++REGISTER_NO_AVX512_DISPATCH(qmul_stub);
++REGISTER_NO_AVX512_DISPATCH(qrelu_leaky_stub);
++REGISTER_NO_AVX512_DISPATCH(qrelu_stub);
++REGISTER_NO_AVX512_DISPATCH(qsigmoid_stub);
++REGISTER_NO_AVX512_DISPATCH(qtanh_stub);
++REGISTER_NO_AVX512_DISPATCH(qthreshold_stub);
++REGISTER_NO_AVX512_DISPATCH(qtopk_stub);
++REGISTER_NO_AVX512_DISPATCH(fake_quant_grad_learnable_channel_stub);
++REGISTER_NO_AVX512_DISPATCH(quantize_tensor_per_tensor_affine_stub);
++REGISTER_NO_AVX512_DISPATCH(quantize_tensor_per_channel_affine_stub);
++REGISTER_NO_AVX512_DISPATCH(quantize_tensor_per_channel_float_qparams_stub);
++REGISTER_NO_AVX512_DISPATCH(quantized_normalize_stub);
++REGISTER_NO_AVX512_DISPATCH(qupsample_bilinear2d_nhwc_stub);
++REGISTER_NO_AVX512_DISPATCH(quantize_tensor_per_tensor_affine_sub_byte_stub);
++REGISTER_NO_AVX512_DISPATCH(dequantize_tensor_per_tensor_affine_sub_byte_stub);
+ #else
+ REGISTER_DISPATCH(dequantize_tensor_per_channel_affine_stub,
+                   &dequantize_tensor_per_channel_affine_cpu);

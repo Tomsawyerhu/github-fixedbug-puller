@@ -14,7 +14,7 @@ artifact_ids_list = [["tensorflow"], ["pytorch"]]
 sensitive_texts = ["fix", "defect", "error", "bug", "issue", "mistake", "correct", "fault", "flaw"]
 diff_file_types = [".cc", ".c", ".py", ".java", ".cpp"]
 time_span = datetime.datetime.strptime("2022-01-01T00:00:00Z", "%Y-%m-%dT%H:%M:%SZ")
-page_limit = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+page_limit = [0,1,2,3,4,5,6,7,8,9,]
 fixed_bugs = []
 output = "./pull.json"
 
@@ -58,17 +58,25 @@ def find_code_diffs(soup: BeautifulSoup):
             continue
         # where is the file
         code_dir = diff_code.find(class_="Truncate").a["title"]
+        if "test" in code_dir:
+            continue
 
         # diff table
         code1 = ""
         code2 = ""
         diff_table = diff_code.find("table")
-        k = 0
         method = None
         for tr in diff_table.tbody.find_all("tr"):
-            if k == 0:
-                # first row, method name
-                td = list(tr.find_all("td"))[1]
+            td = list(tr.find_all("td"))[-1]
+            if "@@" in td.text:
+                if method is not None:
+                    cf = CodeDiff(file_type, code_dir, code1, code2)
+                    cf.method_name = method
+                    result.append(cf)
+                    # clear
+                    code1 = ""
+                    code2 = ""
+                # method name
                 method = td.text.split("@@")[-1].strip()
             elif len(list(tr.find_all("td"))) == 3:
 
@@ -85,11 +93,10 @@ def find_code_diffs(soup: BeautifulSoup):
                 else:
                     code1 += td.span.text
                     code2 += td.span.text
-            k += 1
-
-        cf = CodeDiff(file_type, code_dir, code1, code2)
-        cf.method_name = method
-        result.append(cf)
+        if method is not None:
+            cf = CodeDiff(file_type, code_dir, code1, code2)
+            cf.method_name = method
+            result.append(cf)
     return result
 
 

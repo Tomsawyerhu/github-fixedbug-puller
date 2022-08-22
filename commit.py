@@ -48,18 +48,17 @@ def handle_commit_log():
 
 def commit_diff():
     global commits, project_root_path, fixed_bugs, gid, aid
-    for i in range(1, len(commits)):
+    for i in range(len(commits)):
         if commits[i].is_bugfix and commits[i].commit_date > time_span:
-            commit_id1 = commits[i].commit_id
-            commit_id2 = commits[i - 1].commit_id
+            commit_id = commits[i].commit_id
             # git diff
             os.system("cd {}".format(
-                project_root_path) + " && git diff {} {} > {}/git-log/diff.txt".format(commit_id1, commit_id2,
-                                                                                       self_root))
+                project_root_path) + " && git show {} > {}/git-log/diff.txt".format(commit_id,
+                                                                                    self_root))
             # read git diff file
             code_diff = _read_git_diff()
             fixed_bug = FixedBug(gid=gid, aid=aid, oid=None, title=None, tags=None)
-            fixed_bug.cid=commits[i].commit_id
+            fixed_bug.cid = commits[i].commit_id
             fixed_bug.commit_msg = commits[i].commit_message
             fixed_bug.commit_date = commits[i].commit_date.strftime("%Y-%m-%d %H:%M:%S")
             fixed_bug.code_diffs = code_diff
@@ -72,8 +71,10 @@ def _read_git_diff():
     result = []
     with open("./git-log/diff.txt", 'r', encoding='utf8') as f:
         code_diff = None
-        skip = False
+        skip = True
         flag = 0  # 标记需要跳过的行数
+        file_dir = ""
+        language = ""
         code1 = ""
         code2 = ""
         for line in f.readlines():
@@ -82,15 +83,20 @@ def _read_git_diff():
                     code_diff.code1 = code1
                     code_diff.code2 = code2
                     result.append(code_diff)
+                    # clear
                     code_diff = None
+                    file_dir = ""
+                    language = ""
                     code1 = ""
                     code2 = ""
                 file_dir = line.split(" ")[-1][2:].strip()
-                if file_dir.rfind(".") < 0 or file_dir[file_dir.rfind("."):] not in diff_file_types:
+                if "test" in file_dir or file_dir.rfind(".") < 0 or file_dir[file_dir.rfind("."):] not in diff_file_types:
                     skip = True
+                    language = "unknown"
+                else:
+                    skip=False
                 if not skip:
                     language = file_dir[file_dir.rfind("."):]
-                    code_diff = CodeDiff(language=language, dir=file_dir, code1=None, code2=None)
                     flag = 1
             elif not skip:
                 if flag <= 3:
@@ -110,6 +116,17 @@ def _read_git_diff():
                         code1 += "\n"
                         code2 += line
                         code2 += "\n"
+                    else:
+                        if code_diff is not None:
+                            code_diff.code1 = code1
+                            code_diff.code2 = code2
+                            result.append(code_diff)
+                            # clear
+                            code_diff = None
+                            code1 = ""
+                            code2 = ""
+                        code_diff = CodeDiff(language=language, dir=file_dir, code1=None, code2=None)
+                        code_diff.method_name = line[line.rfind("@@") + 2:].strip()
                 flag += 1
         if code_diff is not None:
             code_diff.code1 = code1
@@ -128,6 +145,3 @@ if __name__ == '__main__':
         ff.write(json.dumps([x.__dict__() for x in fixed_bugs], indent=1))
         ff.flush()
         ff.close()
-
-
-
